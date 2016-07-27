@@ -1,0 +1,206 @@
+# This makefile automates the build of releases for sourceforge
+# The RELEASENAME should be changed per release
+# The RELEASEDIR should be set to whatever works for you.
+#
+# 'make' or 'make release'
+# will build both binary and source zipfiles.
+# bin-release or src-release will build only what their names imply.
+#
+# Oh, this works with GNU make under Cygwin. YMMV on other makes...
+
+include version.mfc
+ifeq ($(VER_REV),)
+	RELEASENUM := $(VER_MAJOR).$(VER_MINOR)
+else
+	RELEASENUM := $(VER_MAJOR).$(VER_MINOR).$(VER_REV)
+endif
+RELEASE_SPECIAL := $(VER_SPECIAL)
+
+RELEASENAME= $(RELEASENUM)$(RELEASE_SPECIAL)
+
+RELEASEDIR := /cygdrive/c/local/src/PasswordSafe/Releases
+
+# Shouldn't need to change anything below this line
+
+BINRELNAME := pwsafe-$(RELEASENAME)-bin
+SRCRELNAME := pwsafe-$(RELEASENAME)-src
+
+RM := /usr/bin/rm
+CP := /usr/bin/cp
+MV := /usr/bin/mv
+MKDIR := /usr/bin/mkdir -p
+TAR := /usr/bin/tar
+SED := /usr/bin/sed
+ZIP := /usr/bin/zip
+GIT := "/cygdrive/c/Program Files (x86)/Git/bin/git"
+GPG := /usr/bin/gpg
+GPG_SIGN := $(GPG) --detach-sign --default-key $(GPG_KEY)
+SHA1SUM := /usr/bin/sha1sum
+SF_UPLOAD_CMD := /usr/bin/rsync -avP -e ssh
+SF_UPLOAD_DST :=  $(SF_UPLOAD_ROOT)/passwordsafe/$(RELEASENUM)
+# GitHub upload utility from https://github.com/aktau/github-release
+GH_UPLOAD_CMD := /usr/local/bin/github-release
+export GITHUB_USER := pwsafe
+export GITHUB_REPO := pwsafe
+PYTHON := /usr/bin/python
+MAKENSIS := /cygdrive/c/local/NSIS/makensis.exe
+WIXDIR := /cygdrive/c/local/WIX
+CANDLE := $(WIXDIR)/candle.exe
+LIGHT := $(WIXDIR)/light.exe
+SIGNTOOL := /cygdrive/c/Program\ Files\ \(x86\)/Windows\ Kits/8.1/bin/x64/signtool.exe
+
+RELTAG = V$(subst .,_,$(RELEASENAME))
+
+I18N_DIR := ./src/ui/Windows/I18N
+I18N_DLL_DIR := ./build/bin/pwsafe/I18N
+POT_FILE := $(I18N_DIR)/pwsafe.pot
+HELP_DIR := ./help
+BIN_DIR := ./build/bin/pwsafe/releasem
+TMPDIR := /cygdrive/c/tmp
+RELNOTES := $(CURDIR)/docs/ReleaseNotes.txt
+
+XMLS := $(foreach i,\
+				  pwsafe.xsd pwsafe_filter.xsd pwsafe.xsl \
+					KPV1_to_PWS.xslt KPV2_to_PWS.xslt,\
+				  xml/$i)
+I18N_HELPS := $(foreach i,\
+								DE ES FR RU ZH,\
+								help/pwsafe$(i)/pwsafe$(i).chm)
+I18N_DLLS := $(foreach i,\
+								CZ DE ES PL RU SV ZH FR DA KO NL,\
+								$(I18N_DLL_DIR)/pwsafe$(i).dll)
+
+BIN_MANIFEST = README.txt docs/ReleaseNotes.txt docs/ReleaseNotes.html LICENSE \
+    $(XMLS) \
+		docs/ChangeLog.txt $(BIN_DIR)/pwsafe.exe $(BIN_DIR)/pws_at.dll \
+		$(BIN_DIR)/pws_osk.dll help/default/pwsafe.chm \
+		docs/pad_file.xml
+
+I18N_MANIFEST := $(I18N_HELPS) $(I18N_DLLS)
+
+.PHONY: all release bin-release src-release installables signatures \
+	upload upload-sf upload-github upload-latest sha1sums msi nsis update-pos i18n save-map help \
+	git-tag
+
+all: help release installables signatures sha1sums
+
+upload: upload-sf upload-github upload-latest
+
+upload-sf:
+	(cd $(RELEASEDIR); \
+	 $(SF_UPLOAD_CMD) pwsafe-$(RELEASENAME).exe \
+	 $(BINRELNAME).zip $(SRCRELNAME).zip \
+	 pwsafe-$(RELEASENAME).msi \
+	 pwsafe-$(RELEASENAME)-map+pdb.zip \
+	$(RELNOTES) \
+	 pwsafe-$(RELEASENAME).msi.sig \
+	 pwsafe-$(RELEASENAME).exe.sig \
+	 $(BINRELNAME).zip.sig $(SRCRELNAME).zip.sig $(SF_UPLOAD_DST))
+
+upload-github:
+ifeq ($(GITHUB_TOKEN),)
+	$(error "GITHUB_TOKEN not set")
+endif
+	-$(GH_UPLOAD_CMD) release -t $(RELEASENAME) -d "PasswordSafe release $(RELEASENAME)"
+	(cd $(RELEASEDIR); \
+		$(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n pwsafe-$(RELEASENAME).exe -f pwsafe-$(RELEASENAME).exe; \
+		$(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n pwsafe-$(RELEASENAME).exe.sig -f pwsafe-$(RELEASENAME).exe.sig; \
+		$(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n pwsafe-$(RELEASENAME).msi -f pwsafe-$(RELEASENAME).msi; \
+		$(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n pwsafe-$(RELEASENAME).msi.sig -f pwsafe-$(RELEASENAME).msi.sig; \
+		$(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n $(BINRELNAME).zip -f $(BINRELNAME).zip; \
+		$(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n $(BINRELNAME).zip.sig -f $(BINRELNAME).zip.sig; \
+		$(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n pwsafe-$(RELEASENAME)-map+pdb.zip \
+			-f pwsafe-$(RELEASENAME)-map+pdb.zip)
+	(cd docs; $(GH_UPLOAD_CMD) upload -t $(RELEASENAME) -n ReleaseNotes.txt -f ReleaseNotes.txt)
+
+upload-latest: latest.xml
+	echo "cd public_html" > putlatest.tmp
+	echo "put $<" >> putlatest.tmp
+	echo "cd padfiles" >> putlatest.tmp
+	echo "put docs/pad_file.xml pwsafe.xml"
+	sftp -b putlatest.tmp pwsafe.org
+	$(RM) putlatest.tmp latest.xml
+
+latest.xml: src/ui/Windows/version.h src/ui/wxWidgets/version.h
+	Misc/make-latest-xml.pl $^ > $@
+	chmod 644 $@
+
+
+src/ui/wxWidgets/version.h:
+	Misc/mkversion.pl src/ui/wxWidgets/version.in $@
+
+sha1sums:
+	(cd $(RELEASEDIR); \
+	 $(SHA1SUM) pwsafe-$(RELEASENAME).exe \
+	 pwsafe-$(RELEASENAME).msi \
+	 $(BINRELNAME).zip $(SRCRELNAME).zip)
+
+signatures:
+	$(GPG_SIGN) $(RELEASEDIR)/pwsafe-$(RELEASENAME).exe
+	$(GPG_SIGN) $(RELEASEDIR)/$(BINRELNAME).zip
+	$(GPG_SIGN) $(RELEASEDIR)/$(SRCRELNAME).zip
+	$(GPG_SIGN) $(RELEASEDIR)/pwsafe-$(RELEASENAME).msi
+
+installables: nsis msi
+
+nsis:
+	$(MAKENSIS) /DVERSION=$(RELEASENAME) install/windows/pwsafe.nsi
+	(cd install/windows; $(SIGNTOOL) sign /t http://timestamp.digicert.com /a /fd sha256 pwsafe-$(RELEASENAME).exe)
+	$(MV) install/windows/pwsafe-$(RELEASENAME).exe $(RELEASEDIR)
+
+msi:
+	$(SED) 's/PWSAFE_VERSION/$(RELEASENUM)/' \
+		< install/windows/pwsafe-template.wxs > install/pwsafe.wxs
+	$(CANDLE) install/pwsafe.wxs
+	$(LIGHT) -ext WixUIExtension -cultures:en-us pwsafe.wixobj \
+					-out pwsafe.msi
+	$(MV) pwsafe.msi $(RELEASEDIR)/pwsafe-$(RELEASENAME).msi
+	$(RM) pwsafe.wixobj install/pwsafe.wxs
+
+release:  i18n bin-release src-release
+
+bin-release: save-map
+	@-mkdir $(RELEASEDIR)/$(BINRELNAME)
+
+	$(CP) $(BIN_MANIFEST) $(RELEASEDIR)/$(BINRELNAME)
+	$(CP) $(I18N_MANIFEST) $(RELEASEDIR)/$(BINRELNAME)
+	(cd $(RELEASEDIR); $(ZIP) -9 -r  foo ./$(BINRELNAME); \
+	$(MV) foo.zip $(BINRELNAME).zip)
+	@$(RM) -rf $(RELEASEDIR)/$(BINRELNAME)
+
+save-map:
+	$(ZIP) -9 $(RELEASEDIR)/pwsafe-$(RELEASENAME)-map+pdb.zip \
+	 $(BIN_DIR)/pwsafe.map $(BIN_DIR)/pwsafe.pdb \
+   $(BIN_DIR)/pws_*.pdb		
+
+src-release: ChangeLog $(POT_FILE)
+	@$(MKDIR) $(RELEASEDIR)/$(SRCRELNAME)
+	$(GIT) archive HEAD | $(TAR) -x -C $(RELEASEDIR)/$(SRCRELNAME)
+	$(MV) ChangeLog $(RELEASEDIR)/$(SRCRELNAME)
+	$(CP) src/ui/Windows/version.h $(RELEASEDIR)/$(SRCRELNAME)/src/ui/Windows
+	$(CP) $(POT_FILE) $(RELEASEDIR)/$(SRCRELNAME)
+	(cd $(RELEASEDIR); $(ZIP) -9 -r  bar ./$(SRCRELNAME); \
+	$(MV) bar.zip $(SRCRELNAME).zip)
+	@$(RM) -rf $(RELEASEDIR)/$(SRCRELNAME)
+
+ChangeLog:
+	$(GIT) --no-pager log --format="%ai %aN %n%n%x09* %s%d%n" > $@
+
+$(POT_FILE): $(BIN_DIR)/../release/pwsafe_base.dll
+	$(MAKE) -C $(I18N_DIR) pwsafe.pot
+
+update-pos:
+	$(MAKE) -C $(I18N_DIR) $@
+
+i18n:
+	$(MAKE) -C $(I18N_DIR) dlls
+
+help:
+	$(MAKE) -C $(HELP_DIR)
+
+git-tag:
+	$(GIT) tag -u $(GPG_KEY) -m "tag $(RELEASENAME) release" $(RELEASENAME)
+
+# Local variables:
+# mode: Makefile
+# End:
